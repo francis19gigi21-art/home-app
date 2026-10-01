@@ -1,0 +1,48 @@
+{
+  "summary": "Full-stack test of Roomie (Expo web preview + FastAPI + Supabase). Backend pytest 7/7 passed (health, JWT auth guards 401/422, Kitchen AI suggest-meals structure + max_spend=0 honored). Frontend: login (John+Alex), home dashboard, floating nav + quick-add sheet, tasks (complete/add), inventory (count/search/use-item 200g→300g), grocery purchase flow (Milk ₹60 → purchased + expense + budget 1850→1790), expenses settle-up (math verified ₹215, Mark settled works), budget (+₹500 → ₹2,290, history), Kitchen AI (3 meal cards, expiry-aware reasons, No-Spend mode had no missing ingredients, Add-missing → 3 grocery items verified via REST, Cook This → inventory deducted exactly: Chicken 300→0, Tomatoes 4→2, Onions 5→4, Rice 2→1.8), profile + household (PALM26), dietary prefs, logout→welcome, Alex sees same shared data. FOUND+FIXED a critical realtime crash blocking all tab navigation. FOUND one critical Supabase schema bug (missing FK household_members→profiles) that cascades into member names/splits/notifications across the app.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "Supabase REST household_members?select=*,profiles(*)", "issue": "PGRST200: no FK relationship between household_members and profiles in schema cache. AppContext loadUserData members fetch 400s → members=[] globally. Cascades: 'Unassigned' names everywhere (tasks avatars show 'U', settle-up 'Unassigned owes Unassigned', 'bought by there', history 'Unassigned added money'), empty assignee pills in new-task form, Budget Overview renders ZERO contribution rows (maps over empty members), Household screen shows '0 members' with empty list, notifyHousehold sends NO notifications (members empty → rows filtered out → John saw 'All quiet' after Alex-side actions), purchaseGrocery created 'Groceries — Milk' expense with EMPTY expense_splits (distorts settle-up: John net +60 uncountered). Fix: add FK constraint household_members.user_id → profiles.id in Supabase (then PostgREST reload), or fetch profiles in a second query and merge client-side.", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/ai/suggest-meals", "issue": "Works correctly (200, structured meals, max_spend=0 honored). Minor: 503 on empty parse has no retry differentiation; acceptable."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Tasks list / Expenses settle-up / Budget overview / Household members", "issue": "All member-derived names render 'Unassigned' and avatars show 'U' due to the members=[] cascade from the missing profiles FK (see backend_issues.critical). Not a UI bug per se — will resolve once FK is fixed.", "testID": "task-card-*, balance-pair-0, budget-contrib-*", "priority": "CRITICAL"},
+      {"component": "purchaseGrocery (actions.ts)", "issue": "Grocery purchase INSERTs a new inventory_items row even when an item with the same name+unit exists — Milk now appears twice in inventory (count 7→8 with duplicate). Should merge/increment existing item quantity.", "testID": "purchase-confirm", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Notifications", "issue": "Screen renders with empty state, but zero notifications were generated after task completion / grocery purchase / contribution because notifyHousehold receives members=[] (FK bug). Mark-all-read button only appears when entries exist — could not be exercised. Re-test after FK fix.", "affected_testIDs": ["home-notifications"]},
+      {"flow": "Cook This → finished item prompt", "issue": "Works, but the 'Chicken finished → add to grocery' ConfirmSheet appears on top of results; verified visually. No issue, just noted.", "affected_testIDs": ["finished-add-grocery"]}
+    ],
+    "design_issues": [
+      {"screen": "Global", "issues": ["Design is consistent (off-white base, black pill nav, oversized numbers, 8pt spacing, 44px touch targets all verified in code and screenshots). Console warnings on web: 'shadow* style props are deprecated. Use boxShadow' and 'props.pointerEvents is deprecated' — cosmetic RN-web deprecations worth cleaning up."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_roomie_api.py", "/app/test_reports/pytest/pytest_results.xml", "/app/test_reports/shots/"],
+  "action_items": [
+    "CRITICAL: Add FK constraint `household_members.user_id → profiles(id)` in Supabase (SQL: alter table household_members add constraint household_members_user_id_fkey foreign key (user_id) references profiles(id);) then reload PostgREST schema cache — this single fix restores member names, assignee pills, budget contribution rows, household member list, notifications fan-out, and purchase expense splits.",
+    "Verify my fix in src/lib/hooks.ts: realtime channel topics now have a unique per-instance suffix (realtime-js 2.117 reuses channels by topic; second subscriber's .on() after subscribe() threw and crashed every tab via ErrorBoundary). Keep the fix or implement a shared-subscription manager.",
+    "MEDIUM: Merge grocery-purchased items into existing inventory rows (match name+unit) instead of inserting duplicates.",
+    "LOW: Reconsider seed data dates — Supermarket/Electricity expenses are dated in the previous month so 'This month' totals show only new activity; either seed in current month or relabel demo expectations.",
+    "LOW: Clean up RN-web deprecation warnings (shadow* → boxShadow, props.pointerEvents).",
+    "Google sign-in provider not enabled in Supabase (known, out of scope)."
+  ],
+  "critical_code_review_comments": [
+    "src/lib/hooks.ts useHouseholdTable: supabase.channel(topic) MUST be unique per subscriber — realtime-js ≥2.11 returns the existing channel for a duplicate topic and .on() after subscribe() throws, crashing mounted tab stacks. Fixed with random suffix; consider a centralized subscription registry instead.",
+    "AppContext.tsx loadUserData silently swallows the members query error ({ data: membs } with no error check) — a failed join degrades to members=[] with no log/toast. Add error surfacing; silent-empty members corrupted splits and notifications downstream.",
+    "purchaseGrocery is not transactional: grocery update, inventory insert, expense insert, splits insert, wallet insert are sequential awaits — a mid-flow failure leaves partial state (e.g., expense without splits is exactly what happened). Consider a Postgres RPC for atomicity.",
+    "Backend server.py is clean: JWT verified against Supabase JWKS with audience/issuer checks, meals normalized defensively, 503 fallback on LLM failure. No issues.",
+    "Good: all interactive elements have testIDs; no HTML elements in RN code; no deprecated Expo packages (expo-av/barcode-scanner/background-fetch absent)."
+  ],
+  "updated_files": ["/app/frontend/src/lib/hooks.ts", "/app/backend/tests/test_roomie_api.py"],
+  "success_rate": {"backend": "100% (7/7 pytest)", "frontend": "~90% — all requested flows pass except member-name-dependent rendering (blocked by missing FK) and notifications fan-out"},
+  "seed_data_creation": "Test mutations performed then cleaned: 'TEST Mop kitchen floor' task (deleted), 3 AI-sourced grocery items (deleted), ₹500 contribution (deleted), ₹215 settlement (deleted to restore settle-up pair). Left in place per test plan: 'Take garbage out' completed, Chicken 500g→300g then →0 via Cook This, Milk purchased (₹60 expense + inventory row), budget now ₹1,790.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Realtime crash fix already applied in hooks.ts (unique channel topics) — do not revert. The dominant blocker is the missing household_members→profiles FK: after E1 fixes it, retest (1) task avatars/assignee pills, (2) budget Overview contribution rows, (3) settle-up names, (4) notifications entries after cross-user actions + mark-all-read, (5) purchase flow creating expense_splits, (6) household screen member list. Demo budget is now ₹1,790 (not 1,850) due to tested Milk purchase; chicken is at 0g. Login helper: welcome screen has testID welcome-login → login-email/login-password/login-submit. Sheets animate in — wait ~1.2s before clicking buttons inside them.",
+  "rca_of_issue": "BUG 1 (app crash on any tab navigation): @supabase/realtime-js 2.117.2 RealtimeClient.channel() returns the EXISTING channel for a duplicate topic. Expo Router keeps tab screens mounted, so Home's useTasks() channel stayed subscribed; mounting Tasks tab called .on() on the already-subscribed channel → 'cannot add postgres_changes callbacks after subscribe()' → ErrorBoundary 'Something went wrong'. Repro: login → tap Tasks tab. Fixed by appending a unique suffix per hook instance to channel topics in src/lib/hooks.ts; verified tabs + groceries + all screens no longer crash. BUG 2 (Unassigned everywhere): PostgREST PGRST200 — no FK between household_members and profiles, so select=*,profiles(*) returns 400, members=[] app-wide with cascading effects on names, splits, notifications. Needs DDL fix in Supabase by main agent."
+}
