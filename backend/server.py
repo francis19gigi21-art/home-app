@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from functools import lru_cache
 
 import httpx
@@ -136,30 +136,30 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/api/ai/suggest-meals")
-async def suggest_meals(req: SuggestRequest, auth=Depends(current_user)):
-    token = auth["token"]
-    user_id = auth["claims"]["sub"]
+AI_FAIL_MSG = "I couldn't generate meal ideas right now. Your inventory is safe. Try again in a moment."
 
+
+async def build_context(token: str, user_id: str, max_spend: float | None):
     memberships = await supa_get(token, f"household_members?select=household_id&user_id=eq.{user_id}&limit=1")
     if not memberships:
         raise HTTPException(400, "You are not part of a household yet")
     hid = memberships[0]["household_id"]
-
     inventory, members, prefs, wallet, history = await gather_context(token, hid, user_id)
-
     balance = sum(float(t.get("amount", 0)) for t in wallet)
-    inv_ctx = [
-        {
-            "name": i["name"],
-            "quantity": float(i.get("quantity", 0)),
-            "unit": i.get("unit", "pcs"),
-            "expiry_days": expiry_days(i.get("expiry_date")),
-        }
-        for i in inventory
-        if float(i.get("quantity", 0)) > 0
-    ]
-    context = {
+    inv_ctx = sorted(
+        [
+            {
+                "name": i["name"],
+                "quantity": float(i.get("quantity", 0)),
+                "unit": i.get("unit", "pcs"),
+                "expiry_days": expiry_days(i.get("expiry_date")),
+            }
+            for i in inventory
+            if float(i.get("quantity", 0)) > 0
+        ],
+        key=lambda x: x["expiry_days"] if x["expiry_days"] is not None else 9999,
+    )
+    return hid, {
         "household_size": max(len(members), 1),
         "inventory": inv_ctx,
         "available_budget": round(balance, 2),
@@ -168,9 +168,104 @@ async def suggest_meals(req: SuggestRequest, auth=Depends(current_user)):
             "allergies": (prefs or {}).get("allergies", []),
             "disliked_foods": (prefs or {}).get("disliked_foods", []),
         },
-        "max_additional_spend": req.max_spend,
+        "max_additional_spend": max_spend,
         "recent_meals": [m.get("name") for h in history for m in (h.get("meals") or [])][:8],
     }
+
+
+async def ask_gemini(session_id: str, system: str, text: str) -> str:
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+
+        chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=system).with_model(
+            "gemini", "gemini-3-flash-preview"
+        )
+        return await chat.send_message(UserMessage(text=text))
+    except Exception as e:
+        logger.error("AI call failed: %s", e)
+        raise HTTPException(503, AI_FAIL_MSG)
+
+
+def extract_json(reply: str) -> dict | None:
+    text = (reply or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+class PlanRequest(BaseModel):
+    days: int
+    start_date: str
+    max_spend: float | None = None
+
+
+MEAL_TYPES = ("breakfast", "lunch", "dinner")
+
+
+@app.post("/api/ai/meal-plan")
+async def meal_plan(req: PlanRequest, auth=Depends(current_user)):
+    if req.days < 1 or req.days > 7:
+        raise HTTPException(422, "Plan between 1 and 7 days")
+    try:
+        start = date.fromisoformat(req.start_date)
+    except ValueError:
+        raise HTTPException(422, "Invalid start date")
+    token, user_id = auth["token"], auth["claims"]["sub"]
+    hid, context = await build_context(token, user_id, req.max_spend)
+    context["days_to_plan"] = req.days
+
+    system = (
+        "You are Kitchen AI, planning meals for a shared household. You receive JSON with real inventory "
+        "(sorted by days until expiry), food budget, household size and dietary preferences. "
+        "Plan breakfast, lunch and dinner for each day. Use ingredients that expire soonest in the EARLIEST days. "
+        "Mostly use what is at home; keep total extra spend modest and within available_budget "
+        "(and within max_additional_spend for the whole plan if set). Do not repeat a dish. "
+        "Respect diet and allergies strictly. Keep reasons under 15 words. "
+        "Reply with STRICT JSON only, no markdown: "
+        '{"days": [{"day_index": int (0-based), "meals": [{"meal_type": "breakfast|lunch|dinner", "name": str, '
+        '"prep_time_minutes": int, "available_ingredients": [str], '
+        '"missing_ingredients": [{"name": str, "estimated_price": number}], '
+        '"estimated_additional_cost": number, "reason": str}]}]}'
+    )
+    reply = await ask_gemini(
+        f"plan-{hid}-{user_id}", system,
+        f"Plan {req.days} day(s).\n\nContext:\n{json.dumps(context, default=str)}",
+    )
+    data = extract_json(reply) or {}
+    plan = []
+    for day in data.get("days") or []:
+        if not isinstance(day, dict):
+            continue
+        try:
+            idx = int(day.get("day_index", 0))
+        except (TypeError, ValueError):
+            continue
+        if idx < 0 or idx >= req.days:
+            continue
+        meal_date = (start + timedelta(days=idx)).isoformat()
+        for meal in day.get("meals") or []:
+            if not isinstance(meal, dict) or not meal.get("name"):
+                continue
+            mtype = str(meal.get("meal_type", "")).lower()
+            if mtype not in MEAL_TYPES:
+                continue
+            normalized = normalize_meal({**meal, "category": mtype.title()})
+            if normalized:
+                plan.append({"meal_date": meal_date, "meal_type": mtype, "meal_name": normalized["name"], "recipe_data": normalized})
+    if not plan:
+        raise HTTPException(503, AI_FAIL_MSG)
+    return {"plan": plan}
+
+
+@app.post("/api/ai/suggest-meals")
+async def suggest_meals(req: SuggestRequest, auth=Depends(current_user)):
+    token = auth["token"]
+    user_id = auth["claims"]["sub"]
+    hid, context = await build_context(token, user_id, req.max_spend)
 
     system = (
         "You are Kitchen AI for a shared household app. You receive JSON context with the household's "
@@ -190,25 +285,10 @@ async def suggest_meals(req: SuggestRequest, auth=Depends(current_user)):
         "'uses' lists the inventory items and approximate quantities the recipe consumes."
     )
 
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"meals-{hid}-{user_id}",
-            system_message=system,
-        ).with_model("gemini", "gemini-3-flash-preview")
-
-        user_message = UserMessage(
-            text=f"Request: {req.prompt}\n\nContext:\n{json.dumps(context, default=str)}"
-        )
-        reply = await chat.send_message(user_message)
-    except Exception as e:
-        logger.error("AI call failed: %s", e)
-        raise HTTPException(
-            503,
-            "I couldn't generate meal ideas right now. Your inventory is safe. Try again in a moment.",
-        )
+    reply = await ask_gemini(
+        f"meals-{hid}-{user_id}", system,
+        f"Request: {req.prompt}\n\nContext:\n{json.dumps(context, default=str)}",
+    )
 
     meals = parse_meals(reply)
     if not meals:

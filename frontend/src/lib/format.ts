@@ -86,6 +86,11 @@ export function fmtQty(q: number): string {
   return Number.isInteger(q) ? String(q) : q.toFixed(1).replace(/\.0$/, "");
 }
 
+// Local-date ISO (YYYY-MM-DD) — avoids UTC shift from toISOString().
+export function localIso(d: Date = new Date()): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 export function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(diff / 60000);

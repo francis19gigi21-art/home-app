@@ -433,3 +433,26 @@ begin
   begin alter publication supabase_realtime add table public.household_members; exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.notifications; exception when duplicate_object then null; end;
 end $$;
+
+-- ============ v2: inventory usage log (waste-saver digest) ============
+create table if not exists public.inventory_usage (
+  id uuid primary key default gen_random_uuid(),
+  household_id uuid not null references public.households(id) on delete cascade,
+  item_name text not null,
+  quantity numeric not null check (quantity > 0),
+  unit text not null default 'pcs',
+  estimated_value numeric not null default 0,
+  days_to_expiry integer,
+  source text not null default 'manual' check (source in ('manual','cook')),
+  used_by uuid references auth.users(id),
+  created_at timestamptz not null default now()
+);
+alter table public.inventory_usage enable row level security;
+drop policy if exists usage_all on public.inventory_usage;
+create policy usage_all on public.inventory_usage for all to authenticated
+  using (public.is_household_member(household_id))
+  with check (public.is_household_member(household_id));
+do $$ begin
+  begin alter publication supabase_realtime add table public.inventory_usage; exception when duplicate_object then null; end;
+  begin alter publication supabase_realtime add table public.meal_plans; exception when duplicate_object then null; end;
+end $$;

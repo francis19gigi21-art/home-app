@@ -1,5 +1,6 @@
 import { supabase } from "@/src/lib/supabase";
 import { notifyHousehold } from "@/src/lib/hooks";
+import { daysUntil } from "@/src/lib/format";
 import type { GroceryItem, HouseholdMember, InventoryItem, Task } from "@/src/lib/types";
 
 function nextOccurrence(due: string | null, recurrence: Task["recurrence"]): string | null {
@@ -172,11 +173,32 @@ export async function addExpenseRecord(
   );
 }
 
-// Deduct quantity from an inventory item. Returns the new quantity.
-export async function useInventoryQuantity(item: InventoryItem, used: number): Promise<number> {
-  const newQty = Math.max(0, Math.round((Number(item.quantity) - used) * 100) / 100);
+// Deduct quantity from an inventory item and log it for the waste-saver digest. Returns the new quantity.
+export async function useInventoryQuantity(
+  item: InventoryItem,
+  used: number,
+  source: "manual" | "cook" = "manual",
+): Promise<number> {
+  const actual = Math.min(used, Number(item.quantity));
+  const newQty = Math.max(0, Math.round((Number(item.quantity) - actual) * 100) / 100);
   const { error } = await supabase.from("inventory_items").update({ quantity: newQty }).eq("id", item.id);
   if (error) throw new Error(error.message);
+  if (actual > 0) {
+    const { data } = await supabase.auth.getSession();
+    const value = item.estimated_cost && Number(item.quantity) > 0
+      ? Math.round((Number(item.estimated_cost) * actual / Number(item.quantity)) * 100) / 100
+      : 0;
+    await supabase.from("inventory_usage").insert({
+      household_id: item.household_id,
+      item_name: item.name,
+      quantity: actual,
+      unit: item.unit,
+      estimated_value: value,
+      days_to_expiry: daysUntil(item.expiry_date),
+      source,
+      used_by: data.session?.user.id ?? null,
+    });
+  }
   return newQty;
 }
 

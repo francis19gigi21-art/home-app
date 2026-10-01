@@ -4,7 +4,7 @@ import { supabase } from "@/src/lib/supabase";
 import { useApp } from "@/src/context/AppContext";
 import type {
   AppNotification, Expense, GroceryItem, HouseholdMember, InventoryItem,
-  Settlement, Task, WalletTransaction,
+  Settlement, Task, WalletTransaction, Note, CalendarEvent, MealPlan, InventoryUsage,
 } from "@/src/lib/types";
 
 type TableOpts = { select?: string; order?: string; ascending?: boolean };
@@ -177,4 +177,20 @@ export function computeBalances(
     if (creditors[j].amt < 0.5) j++;
   }
   return { net, pairs };
+}
+
+export function useNotes() {
+  return useHouseholdTable<Note>("notes", { order: "updated_at" });
+}
+
+export function useCalendarEvents() {
+  return useHouseholdTable<CalendarEvent>("calendar_events", { order: "event_date", ascending: true });
+}
+
+export function useMealPlans() {
+  return useHouseholdTable<MealPlan>("meal_plans", { order: "meal_date", ascending: true });
+}
+
+export function useInventoryUsage() {
+  return useHouseholdTable<InventoryUsage>("inventory_usage", { order: "created_at" });
 }

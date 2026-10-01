@@ -29,3 +29,15 @@ export async function suggestMeals(prompt: string, maxSpend?: number | null): Pr
   const json = await authedFetch("/ai/suggest-meals", { prompt, max_spend: maxSpend ?? null });
   return (json?.meals ?? []) as MealSuggestion[];
 }
+
+export type PlannedMeal = {
+  meal_date: string;
+  meal_type: "breakfast" | "lunch" | "dinner";
+  meal_name: string;
+  recipe_data: MealSuggestion;
+};
+
+export async function generateMealPlan(days: number, startDate: string): Promise<PlannedMeal[]> {
+  const json = await authedFetch("/ai/meal-plan", { days, start_date: startDate });
+  return (json?.plan ?? []) as PlannedMeal[];
+}

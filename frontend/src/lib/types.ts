@@ -160,3 +160,50 @@ export type MealSuggestion = {
   instructions: string[];
   uses?: { name: string; quantity: number; unit: string }[];
 };
+
+export type Note = {
+  id: string;
+  household_id: string;
+  title: string;
+  content: string | null;
+  sensitive: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CalendarEvent = {
+  id: string;
+  household_id: string;
+  title: string;
+  description: string | null;
+  category: string;
+  event_date: string;
+  event_time: string | null;
+  created_by: string;
+  created_at: string;
+};
+
+export type MealPlan = {
+  id: string;
+  household_id: string;
+  meal_date: string;
+  meal_type: "breakfast" | "lunch" | "dinner";
+  meal_name: string;
+  recipe_data: MealSuggestion | null;
+  created_by: string;
+  created_at: string;
+};
+
+export type InventoryUsage = {
+  id: string;
+  household_id: string;
+  item_name: string;
+  quantity: number;
+  unit: string;
+  estimated_value: number;
+  days_to_expiry: number | null;
+  source: "manual" | "cook";
+  used_by: string | null;
+  created_at: string;
+};

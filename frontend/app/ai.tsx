@@ -89,7 +89,7 @@ export default function KitchenAi() {
       for (const u of uses) {
         const match = matchInventory(inventory.data ?? [], u.name);
         if (!match) continue;
-        const newQty = await useInventoryQuantity(match, Number(u.quantity) || 0);
+        const newQty = await useInventoryQuantity(match, Number(u.quantity) || 0, "cook");
         if (newQty <= 0) finished.push(match);
       }
       toast("Inventory updated — enjoy your meal!", "success");
